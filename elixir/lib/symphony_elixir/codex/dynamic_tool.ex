@@ -3,7 +3,7 @@ defmodule SymphonyElixir.Codex.DynamicTool do
   Executes client-side tool calls requested by Codex app-server turns.
   """
 
-  alias SymphonyElixir.Linear.Client
+  alias SymphonyElixir.{Config, Linear.Client, Plane}
 
   @linear_graphql_tool "linear_graphql"
   @linear_graphql_description """
@@ -26,11 +26,45 @@ defmodule SymphonyElixir.Codex.DynamicTool do
     }
   }
 
+  @plane_rest_tool "plane_rest"
+  @plane_rest_description """
+  Execute a REST request against Plane using Symphony's configured auth. Paths must start with /api/v1/.
+  """
+  @plane_rest_input_schema %{
+    "type" => "object",
+    "additionalProperties" => false,
+    "required" => ["method", "path"],
+    "properties" => %{
+      "method" => %{
+        "type" => "string",
+        "enum" => ["GET", "POST", "PATCH", "DELETE"],
+        "description" => "HTTP method to use."
+      },
+      "path" => %{
+        "type" => "string",
+        "description" => "Plane API path beginning with /api/v1/."
+      },
+      "query" => %{
+        "type" => ["object", "null"],
+        "description" => "Optional query parameters.",
+        "additionalProperties" => true
+      },
+      "body" => %{
+        "type" => ["object", "null"],
+        "description" => "Optional JSON request body.",
+        "additionalProperties" => true
+      }
+    }
+  }
+
   @spec execute(String.t() | nil, term(), keyword()) :: map()
   def execute(tool, arguments, opts \\ []) do
     case tool do
       @linear_graphql_tool ->
         execute_linear_graphql(arguments, opts)
+
+      @plane_rest_tool ->
+        execute_plane_rest(arguments, opts)
 
       other ->
         failure_response(%{
@@ -44,13 +78,25 @@ defmodule SymphonyElixir.Codex.DynamicTool do
 
   @spec tool_specs() :: [map()]
   def tool_specs do
-    [
-      %{
-        "name" => @linear_graphql_tool,
-        "description" => @linear_graphql_description,
-        "inputSchema" => @linear_graphql_input_schema
-      }
-    ]
+    case Config.settings!().tracker.kind do
+      "plane" ->
+        [
+          %{
+            "name" => @plane_rest_tool,
+            "description" => @plane_rest_description,
+            "inputSchema" => @plane_rest_input_schema
+          }
+        ]
+
+      _ ->
+        [
+          %{
+            "name" => @linear_graphql_tool,
+            "description" => @linear_graphql_description,
+            "inputSchema" => @linear_graphql_input_schema
+          }
+        ]
+    end
   end
 
   defp execute_linear_graphql(arguments, opts) do
@@ -62,6 +108,20 @@ defmodule SymphonyElixir.Codex.DynamicTool do
     else
       {:error, reason} ->
         failure_response(tool_error_payload(reason))
+    end
+  end
+
+  defp execute_plane_rest(arguments, opts) do
+    plane_request = Keyword.get(opts, :plane_request, &Plane.Client.request/3)
+
+    with {:ok, method, path, query, body} <- normalize_plane_rest_arguments(arguments),
+         request_opts <- plane_request_opts(query, body),
+         {:ok, response} <- plane_request.(method, path, request_opts) do
+      success = response.status in 200..299
+      dynamic_tool_response(success, encode_payload(%{"status" => response.status, "body" => response.body}))
+    else
+      {:error, reason} ->
+        failure_response(plane_tool_error_payload(reason))
     end
   end
 
@@ -90,6 +150,33 @@ defmodule SymphonyElixir.Codex.DynamicTool do
 
   defp normalize_linear_graphql_arguments(_arguments), do: {:error, :invalid_arguments}
 
+  defp normalize_plane_rest_arguments(arguments) when is_map(arguments) do
+    method = arguments["method"] || arguments[:method]
+    path = arguments["path"] || arguments[:path]
+    query = arguments["query"] || arguments[:query] || %{}
+    body = arguments["body"] || arguments[:body]
+    normalized_method = method |> to_string() |> String.upcase()
+
+    cond do
+      normalized_method not in ["GET", "POST", "PATCH", "DELETE"] ->
+        {:error, :invalid_plane_method}
+
+      not is_binary(path) or not String.starts_with?(path, "/api/v1/") ->
+        {:error, :invalid_plane_path}
+
+      not is_map(query) ->
+        {:error, :invalid_plane_query}
+
+      not (is_nil(body) or is_map(body)) ->
+        {:error, :invalid_plane_body}
+
+      true ->
+        {:ok, normalized_method |> String.downcase() |> String.to_atom(), path, query, body}
+    end
+  end
+
+  defp normalize_plane_rest_arguments(_arguments), do: {:error, :invalid_plane_arguments}
+
   defp normalize_query(arguments) do
     case Map.get(arguments, "query") || Map.get(arguments, :query) do
       query when is_binary(query) ->
@@ -109,6 +196,9 @@ defmodule SymphonyElixir.Codex.DynamicTool do
       _ -> {:error, :invalid_variables}
     end
   end
+
+  defp plane_request_opts(query, nil), do: [params: query]
+  defp plane_request_opts(query, body), do: [params: query, json: body]
 
   defp graphql_response(response) do
     success =
@@ -143,6 +233,35 @@ defmodule SymphonyElixir.Codex.DynamicTool do
   end
 
   defp encode_payload(payload), do: inspect(payload)
+
+  defp plane_tool_error_payload(:invalid_plane_method),
+    do: %{"error" => %{"message" => "`plane_rest.method` must be GET, POST, PATCH, or DELETE."}}
+
+  defp plane_tool_error_payload(:invalid_plane_path),
+    do: %{"error" => %{"message" => "`plane_rest.path` must start with /api/v1/."}}
+
+  defp plane_tool_error_payload(:invalid_plane_query),
+    do: %{"error" => %{"message" => "`plane_rest.query` must be an object when provided."}}
+
+  defp plane_tool_error_payload(:invalid_plane_body),
+    do: %{"error" => %{"message" => "`plane_rest.body` must be an object when provided."}}
+
+  defp plane_tool_error_payload(:invalid_plane_arguments),
+    do: %{
+      "error" => %{
+        "message" => "`plane_rest` expects an object with method, path, optional query, and optional body."
+      }
+    }
+
+  defp plane_tool_error_payload(:missing_plane_api_token),
+    do: %{
+      "error" => %{
+        "message" => "Symphony is missing Plane auth. Set `tracker.api_key` in `WORKFLOW.md` or export `PLANE_API_KEY`."
+      }
+    }
+
+  defp plane_tool_error_payload(reason),
+    do: %{"error" => %{"message" => "Plane REST tool execution failed.", "reason" => inspect(reason)}}
 
   defp tool_error_payload(:missing_query) do
     %{

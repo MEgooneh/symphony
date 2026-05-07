@@ -1,6 +1,6 @@
 defmodule SymphonyElixir.Orchestrator do
   @moduledoc """
-  Polls Linear and dispatches repository copies to Codex-backed workers.
+  Polls the configured issue tracker and dispatches repository copies to Codex-backed workers.
   """
 
   use GenServer
@@ -230,7 +230,7 @@ defmodule SymphonyElixir.Orchestrator do
       choose_issues(issues, state)
     else
       {:error, :missing_linear_api_token} ->
-        Logger.error("Linear API token missing in WORKFLOW.md")
+        Logger.error("Issue tracker API token missing in WORKFLOW.md")
         state
 
       {:error, :missing_linear_project_slug} ->
@@ -264,7 +264,7 @@ defmodule SymphonyElixir.Orchestrator do
         state
 
       {:error, reason} ->
-        Logger.error("Failed to fetch from Linear: #{inspect(reason)}")
+        Logger.error("Failed to fetch from issue tracker: #{inspect(reason)}")
         state
 
       false ->
