@@ -47,6 +47,9 @@ defmodule SymphonyElixir.Config.Schema do
     embedded_schema do
       field(:kind, :string)
       field(:endpoint, :string, default: "https://api.linear.app/graphql")
+      field(:workspace_slug, :string)
+      field(:project_id, :string)
+      field(:project_key, :string)
       field(:api_key, :string)
       field(:project_slug, :string)
       field(:assignee, :string)
@@ -59,7 +62,7 @@ defmodule SymphonyElixir.Config.Schema do
       schema
       |> cast(
         attrs,
-        [:kind, :endpoint, :api_key, :project_slug, :assignee, :active_states, :terminal_states],
+        [:kind, :endpoint, :api_key, :project_slug, :workspace_slug, :project_id, :project_key, :assignee, :active_states, :terminal_states],
         empty_values: []
       )
     end
@@ -368,8 +371,12 @@ defmodule SymphonyElixir.Config.Schema do
   defp finalize_settings(settings) do
     tracker = %{
       settings.tracker
-      | api_key: resolve_secret_setting(settings.tracker.api_key, System.get_env("LINEAR_API_KEY")),
-        assignee: resolve_secret_setting(settings.tracker.assignee, System.get_env("LINEAR_ASSIGNEE"))
+      | endpoint: resolve_tracker_endpoint(settings.tracker),
+        api_key: resolve_tracker_api_key(settings.tracker),
+        workspace_slug: resolve_env_backed_setting(settings.tracker.workspace_slug),
+        project_id: resolve_env_backed_setting(settings.tracker.project_id),
+        project_key: resolve_env_backed_setting(settings.tracker.project_key),
+        assignee: resolve_tracker_assignee(settings.tracker)
     }
 
     workspace = %{
@@ -412,6 +419,38 @@ defmodule SymphonyElixir.Config.Schema do
 
   defp drop_nil_values(value) when is_list(value), do: Enum.map(value, &drop_nil_values/1)
   defp drop_nil_values(value), do: value
+
+  defp resolve_tracker_endpoint(%{kind: "plane", endpoint: endpoint})
+       when endpoint in [nil, "", "https://api.linear.app/graphql"] do
+    "https://api.plane.so"
+  end
+
+  defp resolve_tracker_endpoint(%{endpoint: endpoint}), do: endpoint
+
+  defp resolve_tracker_api_key(%{kind: "plane", api_key: api_key}) do
+    resolve_secret_setting(api_key, System.get_env("PLANE_API_KEY"))
+  end
+
+  defp resolve_tracker_api_key(%{api_key: api_key}) do
+    resolve_secret_setting(api_key, System.get_env("LINEAR_API_KEY"))
+  end
+
+  defp resolve_tracker_assignee(%{kind: "plane", assignee: assignee}) do
+    resolve_secret_setting(assignee, System.get_env("PLANE_ASSIGNEE"))
+  end
+
+  defp resolve_tracker_assignee(%{assignee: assignee}) do
+    resolve_secret_setting(assignee, System.get_env("LINEAR_ASSIGNEE"))
+  end
+
+  defp resolve_env_backed_setting(value) when is_binary(value) do
+    case resolve_env_value(value, nil) do
+      resolved when is_binary(resolved) -> normalize_secret_value(resolved)
+      resolved -> resolved
+    end
+  end
+
+  defp resolve_env_backed_setting(value), do: value
 
   defp resolve_secret_setting(nil, fallback), do: normalize_secret_value(fallback)
 
